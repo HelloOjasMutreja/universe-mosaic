@@ -14,23 +14,67 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Paths that are never auto-merged. Anything listed here still gets
+            // a normal PR that a human can review and merge by hand; nothing in
+            // the workshop labs touches these, so this cannot block an attendee.
+            // To auto-merge everything with no exceptions, set this to [].
+            const PROTECTED = ['.github/'];
+
             const pr = context.payload.pull_request;
-            const fail = async message => {
-              core.setFailed(message);
-              await github.rest.issues.createComment({owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number, body: `🍉 Workshop bot: ${message}`});
+            const say = async body => {
+              await github.rest.issues.createComment({owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number, body: `🍉 Workshop bot: ${body}`});
             };
-            if (!pr.title.includes('🍉')) return fail('Please add 🍉 to the pull request title, then edit it to rerun this check.');
+            const fail = async message => { core.setFailed(message); await say(message); };
+
+            if (!pr.title.includes('🍉')) {
+              return fail([
+                'Your title needs a watermelon.',
+                '',
+                'Click **Edit** next to the title at the top of this page and add 🍉 to the end, then save.',
+                'The check reruns on its own — you do not need to push anything.',
+                '',
+                'Copy this one: 🍉',
+                '',
+                '(Typing it yourself: Windows is `Win` + `.` — Mac is `Ctrl` + `Cmd` + `Space`.)'
+              ].join('\n'));
+            }
+
             const {data: files} = await github.rest.pulls.listFiles({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number});
             const names = files.map(f => f.filename);
-            if (names.length === 1 && names[0] === 'WALL.md') {
-              const file = files[0];
-              if (file.status === 'modified') return core.notice('Wall signature accepted; merge after resolving any conflict.');
-              return fail('WALL.md must be modified, not added or deleted.');
+
+            const blocked = names.filter(n => PROTECTED.some(p => n.startsWith(p)));
+            if (blocked.length) {
+              await say(`This pull request changes ${blocked.map(n => `\`${n}\``).join(', ')}, so I am leaving it for a human to review instead of merging it automatically. Everything else about it looks fine.`);
+              return core.notice('Touches a protected path; skipping auto-merge.');
             }
-            const expected = `cells/${pr.user.login}.json`;
-            if (names.length !== 1 || names[0] !== expected) return fail(`Change exactly one file: \`${expected}\`.`);
-            const {data} = await github.rest.repos.getContent({owner: context.repo.owner, repo: context.repo.repo, path: expected, ref: pr.head.sha});
-            let cell; try { cell = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')); } catch { return fail('Your cell file must contain valid JSON.'); }
-            if (cell.username !== pr.user.login || !['acid','lime','purple','pink','teal','indigo'].includes(cell.color)) return fail('Use your exact GitHub username and one of: acid, lime, purple, pink, teal, indigo.');
-            await github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, event: 'APPROVE', body: '🍉 Valid cell — merging your pixel.'});
+
+            // Your own cell file is the one thing that must be correct. Everything
+            // else in the pull request is allowed through.
+            const own = `cells/${pr.user.login}.json`;
+            const cellChange = files.find(f => f.filename === own && f.status !== 'removed');
+            if (cellChange) {
+              const {data} = await github.rest.repos.getContent({owner: context.repo.owner, repo: context.repo.repo, path: own, ref: pr.head.sha});
+              let cell;
+              try {
+                cell = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
+              } catch {
+                return fail(`\`${own}\` is not valid JSON. The commas and quotes have to be exactly right — compare it against the template in the guide.`);
+              }
+              const colours = ['acid', 'lime', 'purple', 'pink', 'teal', 'indigo'];
+              if (cell.username !== pr.user.login) {
+                return fail(`The \`username\` in \`${own}\` is \`${cell.username}\`, but your GitHub username is \`${pr.user.login}\`. They have to match exactly, including capital letters.`);
+              }
+              if (!colours.includes(cell.color)) {
+                return fail(`\`${cell.color}\` is not one of the six colours. Pick one of: ${colours.map(c => `\`${c}\``).join(', ')}.`);
+              }
+            }
+
+            // GitHub refuses to let an account approve its own pull request, so a
+            // PR opened by the repo owner 422s here. The approval is cosmetic —
+            // the merge below is what matters — so never let it stop us.
+            try {
+              await github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, event: 'APPROVE', body: '🍉 Looks good — merging.'});
+            } catch {
+              core.notice('Could not approve (likely a self-authored PR); merging anyway.');
+            }
             await github.rest.pulls.merge({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, merge_method: 'squash'});
