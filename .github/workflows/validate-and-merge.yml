@@ -69,5 +69,12 @@ jobs:
               }
             }
 
-            await github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, event: 'APPROVE', body: '🍉 Looks good — merging.'});
+            // GitHub refuses to let an account approve its own pull request, so a
+            // PR opened by the repo owner 422s here. The approval is cosmetic —
+            // the merge below is what matters — so never let it stop us.
+            try {
+              await github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, event: 'APPROVE', body: '🍉 Looks good — merging.'});
+            } catch {
+              core.notice('Could not approve (likely a self-authored PR); merging anyway.');
+            }
             await github.rest.pulls.merge({owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, merge_method: 'squash'});
